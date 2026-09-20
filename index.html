@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>House of Longevity — Threshold Transition Prototype</title>
+<title>House of Longevity: Threshold Transition Prototype</title>
 <style>
   :root{
     --bg:#0A0908;
@@ -47,10 +47,16 @@
   .h1 i{font-style:italic;font-weight:400;opacity:.9;}
   .enter{position:absolute;right:6%;bottom:9%;font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:#D8D2C7;z-index:2;}
   .black-hold{position:absolute;inset:0;background:#000;z-index:5;}
-  .glow{position:absolute;inset:0;z-index:4;background:radial-gradient(ellipse at 50% 45%, rgba(244,233,216,0.0) 0%, rgba(244,233,216,0.0) 100%);}
+  /* glow sits ABOVE the black layer so 'never pure black' can actually render (an independent
+     check proved 0 visible pixels when the glow sat under an opaque black layer) */
+  .glow{position:absolute;inset:0;z-index:6;background:radial-gradient(ellipse at 50% 45%, rgba(244,233,216,0.0) 0%, rgba(244,233,216,0.0) 100%);}
   .room-copy{position:absolute;left:0;right:0;bottom:9%;padding:0 6%;z-index:2;}
   .spacer{height:100vh;}
   .measure{position:fixed;left:8px;top:56px;z-index:49;font-size:9.5px;color:#7A756B;background:rgba(20,18,15,.7);padding:4px 7px;border-radius:5px;font-variant-numeric:tabular-nums;}
+  /* The threshold stage must not create a scroll container: overflow:hidden on an ancestor
+     silently disables position:sticky. It also carries the hold length as extra height (JS),
+     which is the scroll slack the black layer needs to actually pin. */
+  #threshold-stage{overflow:visible;}
   @media (prefers-reduced-motion: reduce){
     .sticky{position:relative !important;}
   }
@@ -82,7 +88,7 @@
   </div>
 </div>
 
-<div id="reduced-notice">prefers-reduced-motion detected on this device — showing simple crossfade fallback automatically</div>
+<div id="reduced-notice">Reduced motion active. Showing a simple crossfade fallback.</div>
 <div class="measure" id="measure">t=0.00</div>
 
 <!-- SCENE 1: HERO -->
@@ -100,13 +106,16 @@
 <div class="spacer" id="push-spacer"></div>
 
 <!-- SCENE 2: THRESHOLD (black hold + glow) -->
+<!-- The stage itself is made taller than one screen by the hold length (JS sets height =
+     100vh + hold). That extra height is what gives the sticky child actual slack to PIN on,
+     so the black genuinely holds; previously the stage and its sticky child were both 100vh,
+     giving zero slack, and the 'hold' just scrolled away with the page. -->
 <section class="stage" id="threshold-stage">
   <div class="sticky">
     <div class="black-hold" id="black"></div>
     <div class="glow" id="glow"></div>
   </div>
 </section>
-<div class="spacer" id="hold-spacer"></div>
 
 <!-- SCENE 3: ROOM ONE ARRIVES -->
 <section class="stage" id="room-stage">
@@ -135,166 +144,136 @@
 (function(){
   var state = { hold: 20, pin: 0, glow: 'late', motion: 'full' };
 
-  var reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
-  function applyReducedDefault(){
-    if (reduceMQ.matches) {
-      state.motion = 'reduced';
-      document.querySelectorAll('[data-motion]').forEach(function(b){ b.classList.toggle('active', b.dataset.motion === 'reduced'); });
-      document.getElementById('reduced-notice').style.display = 'block';
-    }
-  }
-  applyReducedDefault();
-
-  document.querySelectorAll('#controls button[data-hold]').forEach(function(btn){
-    btn.addEventListener('click', function(){
-      document.querySelectorAll('[data-hold]').forEach(function(b){ b.classList.remove('active'); });
-      btn.classList.add('active');
-      state.hold = parseInt(btn.dataset.hold, 10);
-      layoutSpacers();
-    });
-  });
-  document.querySelectorAll('#controls button[data-pin]').forEach(function(btn){
-    btn.addEventListener('click', function(){
-      document.querySelectorAll('[data-pin]').forEach(function(b){ b.classList.remove('active'); });
-      btn.classList.add('active');
-      state.pin = parseInt(btn.dataset.pin, 10);
-    });
-  });
-  document.querySelectorAll('#controls button[data-glow]').forEach(function(btn){
-    btn.addEventListener('click', function(){
-      document.querySelectorAll('[data-glow]').forEach(function(b){ b.classList.remove('active'); });
-      btn.classList.add('active');
-      state.glow = btn.dataset.glow;
-    });
-  });
-  document.querySelectorAll('#controls button[data-motion]').forEach(function(btn){
-    btn.addEventListener('click', function(){
-      document.querySelectorAll('[data-motion]').forEach(function(b){ b.classList.remove('active'); });
-      btn.classList.add('active');
-      state.motion = btn.dataset.motion;
-    });
-  });
-
-  // URL param overrides on load: ?hold=35&pin=1&glow=early&motion=reduced
-  var params = new URLSearchParams(location.search);
-  if (params.has('hold')) state.hold = parseInt(params.get('hold'),10);
-  if (params.has('pin')) state.pin = parseInt(params.get('pin'),10);
-  if (params.has('glow')) state.glow = params.get('glow');
-  if (params.has('motion')) state.motion = params.get('motion');
-
+  var thresholdStage = document.getElementById('threshold-stage');
   var pushSpacer = document.getElementById('push-spacer');
-  var holdSpacer = document.getElementById('hold-spacer');
   var black = document.getElementById('black');
   var glow = document.getElementById('glow');
   var lGravel = document.getElementById('l-gravel');
   var lRoom1 = document.getElementById('l-room1');
   var statusline = document.getElementById('statusline');
   var measure = document.getElementById('measure');
+  var reducedNotice = document.getElementById('reduced-notice');
 
-  function vh(v){ return (v/100) * window.innerHeight; }
+  function vh(v){ return (v / 100) * window.innerHeight; }
+  function clamp01(x){ return Math.max(0, Math.min(1, x)); }
 
-  function layoutSpacers(){
-    // push spacer: fixed distance for the door-push beat
-    pushSpacer.style.height = '70vh';
-    // hold spacer: honors the exact chosen vh, including a literal 0 (instant cut, no black frame held)
-    holdSpacer.style.height = state.hold + 'vh';
+  function syncControls(){
+    document.querySelectorAll('[data-hold]').forEach(function(b){ b.classList.toggle('active', parseInt(b.dataset.hold, 10) === state.hold); });
+    document.querySelectorAll('[data-pin]').forEach(function(b){ b.classList.toggle('active', parseInt(b.dataset.pin, 10) === state.pin); });
+    document.querySelectorAll('[data-glow]').forEach(function(b){ b.classList.toggle('active', b.dataset.glow === state.glow); });
+    document.querySelectorAll('[data-motion]').forEach(function(b){ b.classList.toggle('active', b.dataset.motion === state.motion); });
+    reducedNotice.style.display = (state.motion === 'reduced') ? 'block' : 'none';
     statusline.textContent = 'hold=' + state.hold + 'vh pin=' + (state.pin ? 'ON' : 'off') + ' glow=' + state.glow + ' motion=' + state.motion;
   }
-  layoutSpacers();
 
-  function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+  function layout(){
+    pushSpacer.style.height = '70vh';
+    // The threshold stage carries the hold length AS EXTRA HEIGHT (100vh + hold). That extra height
+    // is the sticky child's scroll slack: it is what lets the black layer genuinely PIN (hold) in
+    // place instead of scrolling straight past. hold=0 means no slack and no pinned stretch.
+    thresholdStage.style.height = (state.motion === 'reduced') ? '100vh' : 'calc(100vh + ' + state.hold + 'vh)';
+  }
+
+  // Default to the reduced fallback when the OS asks for reduced motion.
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { state.motion = 'reduced'; }
+
+  // URL overrides on load: ?hold=35&pin=1&glow=early&motion=reduced
+  var params = new URLSearchParams(location.search);
+  if (params.has('hold')) { state.hold = parseInt(params.get('hold'), 10); }
+  if (params.has('pin')) { state.pin = parseInt(params.get('pin'), 10); }
+  if (params.has('glow')) { state.glow = params.get('glow'); }
+  if (params.has('motion')) { state.motion = params.get('motion'); }
+
+  syncControls();
+  layout();
+
+  document.querySelectorAll('[data-hold]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      state.hold = parseInt(btn.dataset.hold, 10);
+      syncControls(); layout(); onScroll();
+    });
+  });
+  document.querySelectorAll('[data-pin]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      state.pin = parseInt(btn.dataset.pin, 10);
+      syncControls(); layout(); onScroll();
+    });
+  });
+  document.querySelectorAll('[data-glow]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      state.glow = btn.dataset.glow;
+      syncControls(); layout(); onScroll();
+    });
+  });
+  document.querySelectorAll('[data-motion]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      state.motion = btn.dataset.motion;
+      syncControls(); layout(); onScroll();
+    });
+  });
 
   function onScroll(){
     var y = window.scrollY;
     var vhpx = window.innerHeight;
 
-    // ---- Scene 1: push toward the door ----
+    // Scene 1: push toward the door.
     var heroStage = document.getElementById('hero-stage');
     var heroTop = heroStage.offsetTop;
-    var pushDist = vh(70);
-    var pushProgress = clamp01((y - heroTop) / pushDist);
-
+    var pushProgress = clamp01((y - heroTop) / vh(70));
     if (state.motion === 'reduced') {
-      // simple crossfade only, no scale/translate parallax
       lGravel.style.transform = 'none';
       lGravel.style.opacity = String(1 - pushProgress);
     } else {
-      var scale = 1 + pushProgress * 0.45;
-      lGravel.style.transform = 'scale(' + scale.toFixed(3) + ')';
+      lGravel.style.transform = 'scale(' + (1 + pushProgress * 0.45).toFixed(3) + ')';
       lGravel.style.opacity = String(1 - Math.max(0, pushProgress - 0.6) * 2.5);
     }
 
-    // ---- Scene 2: threshold black + glow ----
-    var thresholdStage = document.getElementById('threshold-stage');
+    // Scene 2: threshold. The black arrives with the scroll, PINS for the hold length (the stage's
+    // extra height above), then hands off. Layer order: glow sits above the black, so it shows.
     var thTop = thresholdStage.offsetTop;
-    var holdDistPx = Math.max(vh(state.hold), 1); // avoid div-by-zero at hold=0
-    var thProgress = clamp01((y - thTop) / holdDistPx);
+    var holdPx = vh(state.hold);
+    var entryStart = thTop - vhpx * 0.6;
+    var e = clamp01((y - entryStart) / (vhpx * 0.6));
+    var h = clamp01((y - thTop) / Math.max(holdPx, 1));
+    var lift = clamp01((y - (thTop + holdPx)) / (vhpx * 0.7));
+    black.style.opacity = '1';
+    // early: the glow starts rising before the screen is fully black and never returns to zero
+    // across the zone, so it is never pure black. late: true black through the hold, glow only as
+    // the black lifts away.
+    var glowAlpha = (state.glow === 'early')
+      ? (0.03 + 0.10 * e + 0.18 * h + 0.12 * lift)
+      : (0.45 * lift);
+    glow.style.background = 'radial-gradient(ellipse at 50% 48%, rgba(244,233,216,' + glowAlpha.toFixed(3) + ') 0%, rgba(244,233,216,0) 62%)';
 
-    // black opacity: at hold=0 there is still one instant frame of black (a hard cut with
-    // a black flash, not a held black) so the cut never reads as a jarring pop; at hold>0
-    // it holds fully opaque black for the whole zone.
-    var blackOpacity;
-    if (state.hold === 0) {
-      blackOpacity = thProgress < 0.5 ? 1 : 0;
-    } else {
-      blackOpacity = 1;
-    }
-    black.style.opacity = String(blackOpacity);
+    // Scene 3: room one arrives as the black hands off.
+    var roomZoneStart = thTop + holdPx + vhpx * 0.10;
+    var roomProgress = clamp01((y - roomZoneStart) / (vhpx * 0.75));
+    lRoom1.style.opacity = String(clamp01(roomProgress * 1.25));
+    lRoom1.style.transform = (state.motion !== 'reduced') ? 'scale(' + (1.08 - roomProgress * 0.08).toFixed(3) + ')' : 'none';
 
-    // glow timing: 'late' = only appears after black is mostly settled; 'early' = glow starts rising immediately, black never reads as pure/total
-    var glowStart = state.glow === 'early' ? 0.15 : 0.7;
-    var glowT = clamp01((thProgress - glowStart) / (1 - glowStart));
-    var glowAlpha = state.glow === 'early' ? (0.05 + glowT * 0.5) : (glowT * 0.6);
-    if (state.glow === 'early') {
-      glow.style.background = 'radial-gradient(ellipse at 50% 48%, rgba(244,233,216,' + glowAlpha.toFixed(3) + ') 0%, rgba(244,233,216,0) 62%)';
-    } else {
-      glow.style.background = 'radial-gradient(ellipse at 50% 48%, rgba(244,233,216,' + glowAlpha.toFixed(3) + ') 0%, rgba(244,233,216,0) 55%)';
-    }
-
-    // ---- Scene 3: room one arrives ----
-    // Room fade-in begins ONLY once the threshold zone (black hold, in full) has actually
-    // been scrolled past -- not a viewport-height early, which previously let the incoming
-    // room bleed through the tail of the black hold uncontrolled. roomZoneStart is the exact
-    // scroll position where threshold-stage + its hold-spacer ends.
-    var roomStage = document.getElementById('room-stage');
-    var roomZoneStart = thTop + vhpx + vh(state.hold);
-    var roomDist = vh(60);
-    var roomProgress = clamp01((y - roomZoneStart) / roomDist);
-    lRoom1.style.opacity = String(clamp01(roomProgress * 1.4));
-    if (state.motion !== 'reduced') {
-      lRoom1.style.transform = 'scale(' + (1.08 - roomProgress*0.08).toFixed(3) + ')';
-    } else {
-      lRoom1.style.transform = 'none';
-    }
-
-    measure.textContent = 'push t=' + pushProgress.toFixed(2) + '  threshold t=' + thProgress.toFixed(2) + '  room t=' + roomProgress.toFixed(2);
+    measure.textContent = 'push t=' + pushProgress.toFixed(2) + '  threshold entry=' + e.toFixed(2) + ' hold=' + h.toFixed(2) + ' lift=' + lift.toFixed(2) + '  room t=' + roomProgress.toFixed(2);
   }
 
   window.addEventListener('scroll', onScroll, { passive: true });
-  window.addEventListener('resize', layoutSpacers);
+  window.addEventListener('resize', function(){ layout(); onScroll(); });
   onScroll();
 
-  // ---- Real pin implementation ----
-  // When pin=1, entering the black-hold zone captures wheel/touch input for a short,
-  // fixed real-world duration (not tied to scroll distance) so the visitor cannot scroll
-  // past the black no matter how fast they scroll. Releases automatically after PIN_MS.
+  // Pin: when pin=1, entering the black zone swallows scroll input for a short fixed real-time
+  // duration (PIN_MS) so a fast scroll cannot blow straight past the black hold.
   var PIN_MS = 550;
   var pinActive = false;
   var pinReleaseTimer = null;
-  var pinEnteredScrollY = 0;
 
   function inThresholdZone(y){
-    var thresholdStage = document.getElementById('threshold-stage');
     var top = thresholdStage.offsetTop;
-    var bottom = top + thresholdStage.offsetHeight + vh(Math.max(state.hold, 8));
+    var bottom = top + thresholdStage.offsetHeight;
     return y >= top - vh(5) && y <= bottom;
   }
 
   function tryEnterPin(){
-    if (state.pin !== 1 || pinActive) return;
-    if (!inThresholdZone(window.scrollY)) return;
+    if (state.pin !== 1 || pinActive) { return; }
+    if (!inThresholdZone(window.scrollY)) { return; }
     pinActive = true;
-    pinEnteredScrollY = window.scrollY;
     document.body.style.overflow = 'hidden';
     clearTimeout(pinReleaseTimer);
     pinReleaseTimer = setTimeout(function(){
@@ -308,16 +287,12 @@
   }
 
   window.addEventListener('wheel', function(e){
-    if (state.pin === 1 && !pinActive && inThresholdZone(window.scrollY)) {
-      tryEnterPin();
-    }
+    if (state.pin === 1 && !pinActive && inThresholdZone(window.scrollY)) { tryEnterPin(); }
     blockDuringPin(e);
   }, { passive: false });
 
   window.addEventListener('touchmove', function(e){
-    if (state.pin === 1 && !pinActive && inThresholdZone(window.scrollY)) {
-      tryEnterPin();
-    }
+    if (state.pin === 1 && !pinActive && inThresholdZone(window.scrollY)) { tryEnterPin(); }
     blockDuringPin(e);
   }, { passive: false });
 })();
